@@ -2496,11 +2496,12 @@ local function register_builtin_commands()
     -- Validate config first if checkfile is available
     if awful_util.checkfile then
       local result = awful_util.checkfile(conffile)
-      if type(result) ~= "function" then
-        error("Config validation failed: " .. tostring(result))
+      if result then
+        error("Config validation failed: " .. result)
       end
     end
 
+    -- Restart (which reloads config)
     if capi.awesome.restart then
       capi.awesome.restart()
       return "Reloading..."
@@ -2509,10 +2510,11 @@ local function register_builtin_commands()
     end
   end)
 
+  --- restart - Full compositor restart
   ipc.register("restart", function()
     if capi.awesome.restart then
       capi.awesome.restart()
-      return "Reloading..."
+      return "Restarting..."
     else
       error("Restart not supported")
     end

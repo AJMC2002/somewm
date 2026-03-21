@@ -506,6 +506,28 @@ luaA_awesome_get_conffile(lua_State *L)
 
 static int luaA_awesome_shadow_reload(lua_State *L);
 
+static bool
+luaA_reload_is_builtin_reloadable_source(const char *source)
+{
+    static const char *builtin_sources[] = {
+        "/lua/ruled/client.lua",
+        "/lua/ruled/notification.lua",
+        "/lua/awful/rules.lua",
+        NULL,
+    };
+
+    for (size_t i = 0; builtin_sources[i]; i++) {
+        size_t source_len = strlen(source);
+        size_t suffix_len = strlen(builtin_sources[i]);
+
+        if (source_len >= suffix_len
+                && strcmp(source + source_len - suffix_len, builtin_sources[i]) == 0)
+            return true;
+    }
+
+    return false;
+}
+
 bool
 luaA_reload_owns_current_lua_caller(lua_State *L)
 {
@@ -522,6 +544,9 @@ luaA_reload_owns_current_lua_caller(lua_State *L)
     source = ar.source;
     if (!source || source[0] != '@')
         return false;
+
+    if (luaA_reload_is_builtin_reloadable_source(source + 1))
+        return true;
 
     conffile = luaA_awesome_get_conffile(L);
     if (!conffile || conffile[0] == '\0')
@@ -790,6 +815,14 @@ luaA_module_resolves_to_config_dir(lua_State *L, const char *module_name, const 
 }
 
 static void
+luaA_reload_invalidate_loaded_module(lua_State *L, const char *module_name)
+{
+    lua_pushstring(L, module_name);
+    lua_pushnil(L);
+    lua_settable(L, -3);
+}
+
+static void
 luaA_reload_invalidate_config_modules(lua_State *L, const char *conffile)
 {
     char config_dir[PATH_MAX];
@@ -836,11 +869,14 @@ luaA_reload_invalidate_config_modules(lua_State *L, const char *conffile)
     }
 
     for (size_t i = 0; i < modules_len; i++) {
-        lua_pushstring(L, modules_to_clear[i]);
-        lua_pushnil(L);
-        lua_settable(L, -3);
+        luaA_reload_invalidate_loaded_module(L, modules_to_clear[i]);
         free(modules_to_clear[i]);
     }
+
+    luaA_reload_invalidate_loaded_module(L, "ruled");
+    luaA_reload_invalidate_loaded_module(L, "ruled.client");
+    luaA_reload_invalidate_loaded_module(L, "ruled.notification");
+    luaA_reload_invalidate_loaded_module(L, "awful.rules");
 
     free(modules_to_clear);
     lua_pop(L, 2);
@@ -878,10 +914,70 @@ luaA_reload_cleanup_drawins(lua_State *L)
 }
 
 static void
+luaA_reload_cleanup_default_client_keybindings(lua_State *L)
+{
+    int module_idx;
+    int keys_idx;
+    lua_Integer len;
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "awful.keyboard");
+    if (lua_pcall(L, 1, 1, 0) != 0) {
+        warn("failed to load awful.keyboard during reload cleanup: %s",
+             NONULL(lua_tostring(L, -1)));
+        lua_pop(L, 1);
+        return;
+    }
+
+    module_idx = lua_gettop(L);
+    lua_getfield(L, module_idx, "_get_client_keybindings");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 2);
+        return;
+    }
+
+    if (lua_pcall(L, 0, 1, 0) != 0) {
+        warn("failed to get default client keybindings during reload cleanup: %s",
+             NONULL(lua_tostring(L, -1)));
+        lua_pop(L, 2);
+        return;
+    }
+
+    keys_idx = lua_gettop(L);
+    if (!lua_istable(L, keys_idx)) {
+        lua_pop(L, 2);
+        return;
+    }
+
+#if LUA_VERSION_NUM >= 502
+    len = lua_rawlen(L, keys_idx);
+#else
+    len = lua_objlen(L, keys_idx);
+#endif
+    for (lua_Integer i = len; i >= 1; i--) {
+        lua_getfield(L, module_idx, "remove_client_keybinding");
+        if (!lua_isfunction(L, -1)) {
+            lua_pop(L, 1);
+            break;
+        }
+
+        lua_rawgeti(L, keys_idx, i);
+        if (lua_pcall(L, 1, 1, 0) != 0) {
+            warn("failed to clear default client keybinding during reload cleanup: %s",
+                 NONULL(lua_tostring(L, -1)));
+            lua_pop(L, 1);
+            break;
+        }
+
+        lua_pop(L, 1);
+    }
+
+    lua_pop(L, 2);
+}
+
+static void
 luaA_reload_cleanup_runtime(lua_State *L)
 {
-    const char *conffile = luaA_awesome_get_conffile(L);
-
     luaA_signal_cleanup_reloadable(L);
     luaA_class_cleanup_reloadable(L);
 
@@ -900,47 +996,7 @@ luaA_reload_cleanup_runtime(lua_State *L)
     }
     lua_pop(L, 1);
 
-    lua_getglobal(L, "require");
-    lua_pushstring(L, "awful.keyboard");
-    if (lua_pcall(L, 1, 1, 0) != 0) {
-        warn("failed to load awful.keyboard during reload cleanup: %s",
-             NONULL(lua_tostring(L, -1)));
-        lua_pop(L, 1);
-    } else {
-        lua_getfield(L, -1, "_clear_client_keybindings");
-        if (lua_isfunction(L, -1)) {
-            if (lua_pcall(L, 0, 0, 0) != 0) {
-                warn("failed to clear default client keybindings during reload cleanup: %s",
-                     NONULL(lua_tostring(L, -1)));
-                lua_pop(L, 1);
-            }
-        } else {
-            lua_pop(L, 1);
-        }
-        lua_pop(L, 1);
-    }
-
-    lua_getglobal(L, "require");
-    lua_pushstring(L, "gears.object");
-    if (lua_pcall(L, 1, 1, 0) != 0) {
-        warn("failed to load gears.object during reload cleanup: %s",
-             NONULL(lua_tostring(L, -1)));
-        lua_pop(L, 1);
-        return;
-    }
-
-    lua_getfield(L, -1, "_clear_reloadable_class_signals");
-    if (lua_isfunction(L, -1)) {
-        lua_pushstring(L, NONULL(conffile));
-        if (lua_pcall(L, 1, 0, 0) != 0) {
-            warn("failed to clear Lua class signals during reload cleanup: %s",
-                 NONULL(lua_tostring(L, -1)));
-            lua_pop(L, 1);
-        }
-    } else {
-        lua_pop(L, 1);
-    }
-    lua_pop(L, 1);
+    luaA_reload_cleanup_default_client_keybindings(L);
 }
 
 bool

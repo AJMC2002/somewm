@@ -203,16 +203,6 @@ function module.remove_client_keybinding(key)
     return false
 end
 
-function module._clear_client_keybindings()
-    for _, key in ipairs(default_keys) do
-        for _, c in ipairs(capi.client.get(nil, false)) do
-            c:remove_keybinding(key)
-        end
-    end
-
-    default_keys = {}
-end
-
 --- Get X11 keysym and a one-character representation from an Awesome keycode.
 --
 -- A "one-character representation" is a single UTF-8 representing the typical
