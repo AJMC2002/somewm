@@ -23,6 +23,7 @@ docs/*
 !docs/howtonix.md
 .cache/
 .local.mk
+.codex_docs/
 
 # Nix build output
 result

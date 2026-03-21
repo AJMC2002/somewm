@@ -705,6 +705,147 @@ luaA_validate_reload_config(lua_State *L, const char **error_out)
     return true;
 }
 
+static bool
+luaA_path_is_under_dir(const char *path, const char *dir)
+{
+    char resolved_path[PATH_MAX];
+    char resolved_dir[PATH_MAX];
+    size_t dir_len;
+
+    if (!realpath(path, resolved_path) || !realpath(dir, resolved_dir))
+        return false;
+
+    dir_len = strlen(resolved_dir);
+    return strncmp(resolved_path, resolved_dir, dir_len) == 0
+        && (resolved_path[dir_len] == '/' || resolved_path[dir_len] == '\0');
+}
+
+static bool
+luaA_module_resolves_to_config_dir(lua_State *L, const char *module_name, const char *config_dir)
+{
+    bool matches = false;
+    char module_path[PATH_MAX];
+
+    lua_getglobal(L, "package");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+
+    lua_getfield(L, -1, "path");
+    if (!lua_isstring(L, -1)) {
+        lua_pop(L, 2);
+        return false;
+    }
+
+    snprintf(module_path, sizeof(module_path), "%s", module_name);
+    for (char *p = module_path; *p; p++) {
+        if (*p == '.')
+            *p = '/';
+    }
+
+    const char *path_spec = lua_tostring(L, -1);
+    const char *segment = path_spec;
+
+    while (segment && *segment) {
+        const char *next = strchr(segment, ';');
+        size_t len = next ? (size_t)(next - segment) : strlen(segment);
+
+        if (len > 0 && len < PATH_MAX) {
+            char pattern[PATH_MAX];
+            char candidate[PATH_MAX];
+            char *slot;
+
+            memcpy(pattern, segment, len);
+            pattern[len] = '\0';
+
+            slot = strchr(pattern, '?');
+            if (slot) {
+                size_t prefix_len;
+                size_t suffix_len;
+
+                *slot = '\0';
+                prefix_len = strlen(pattern);
+                suffix_len = strlen(slot + 1);
+
+                if (prefix_len + strlen(module_path) + suffix_len + 1 >= sizeof(candidate))
+                    continue;
+
+                memcpy(candidate, pattern, prefix_len);
+                memcpy(candidate + prefix_len, module_path, strlen(module_path));
+                memcpy(candidate + prefix_len + strlen(module_path), slot + 1, suffix_len + 1);
+
+                if (access(candidate, R_OK) == 0 && luaA_path_is_under_dir(candidate, config_dir)) {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+
+        segment = next ? next + 1 : NULL;
+    }
+
+    lua_pop(L, 2);
+    return matches;
+}
+
+static void
+luaA_reload_invalidate_config_modules(lua_State *L, const char *conffile)
+{
+    char config_dir[PATH_MAX];
+    char **modules_to_clear = NULL;
+    size_t modules_len = 0;
+    size_t modules_cap = 0;
+    char *slash;
+
+    snprintf(config_dir, sizeof(config_dir), "%s", conffile);
+    slash = strrchr(config_dir, '/');
+    if (!slash)
+        return;
+    *slash = '\0';
+
+    lua_getglobal(L, "package");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    lua_getfield(L, -1, "loaded");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 2);
+        return;
+    }
+
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+        if (lua_isstring(L, -2)) {
+            const char *module_name = lua_tostring(L, -2);
+            if (module_name && luaA_module_resolves_to_config_dir(L, module_name, config_dir)) {
+                if (modules_len == modules_cap) {
+                    size_t new_cap = modules_cap == 0 ? 8 : modules_cap * 2;
+                    char **new_items = realloc(modules_to_clear, new_cap * sizeof(*modules_to_clear));
+                    if (!new_items)
+                        break;
+                    modules_to_clear = new_items;
+                    modules_cap = new_cap;
+                }
+                modules_to_clear[modules_len++] = a_strdup(module_name);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    for (size_t i = 0; i < modules_len; i++) {
+        lua_pushstring(L, modules_to_clear[i]);
+        lua_pushnil(L);
+        lua_settable(L, -3);
+        free(modules_to_clear[i]);
+    }
+
+    free(modules_to_clear);
+    lua_pop(L, 2);
+}
+
 static void
 luaA_reload_cleanup_drawins(lua_State *L)
 {
@@ -818,6 +959,7 @@ luaA_reload_config(void)
 
     conffile = luaA_awesome_get_conffile(globalconf_L);
     log_info("reloading config from %s", NONULL(conffile));
+    luaA_reload_invalidate_config_modules(globalconf_L, conffile);
     luaA_reload_cleanup_runtime(globalconf_L);
 
     if (!luaA_loadrc())

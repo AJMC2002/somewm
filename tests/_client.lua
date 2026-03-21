@@ -30,12 +30,10 @@ local function detect_terminal()
     -- Try terminals in order of preference
     -- Each entry: { executable, class_flag, exec_flag }
     -- Note: kitty is preferred because it has reliable --class support in headless mode
-    -- ghostty's --class flag has issues in headless/GPU-less environments
     local terminals = {
         { "kitty", "--class=%s", "-e" },
         { "foot", "--app-id=%s", "-e" },
         { "alacritty", "--class=%s", "-e" },
-        { "ghostty", "--class=%s", "-e" },  -- ghostty last due to headless issues
     }
 
     for _, t in ipairs(terminals) do
@@ -53,7 +51,7 @@ local function detect_terminal()
     end
 
     io.stderr:write("WARNING: No suitable terminal found for test clients\n")
-    io.stderr:write("  Tried: ghostty, kitty, foot, alacritty\n")
+    io.stderr:write("  Tried: kitty, foot, alacritty\n")
     return false
 end
 
