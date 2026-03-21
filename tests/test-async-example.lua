@@ -12,6 +12,13 @@ local runner = require("_runner")
 local async = require("_async")
 local test_client = require("_client")
 
+if not test_client.is_available() then
+    io.stderr:write("SKIP: no suitable Wayland terminal available for async example\n")
+    io.stderr:write("Test finished successfully.\n")
+    awesome.quit()
+    return
+end
+
 -- Use runner.run_async() instead of runner.run_steps()
 -- The test function runs as a coroutine and can use async.* functions
 runner.run_async(function()

@@ -32,11 +32,6 @@ TEST_RC_LUA="${TEST_RC_LUA:-}"
 cd "$(dirname "$0")/.."
 ROOT_DIR="$PWD"
 
-# Use minimal test config by default
-if [ -z "$TEST_RC_LUA" ]; then
-    TEST_RC_LUA="$ROOT_DIR/tests/rc.lua"
-fi
-
 # Setup Lua path to include tests directory while preserving any dev-shell Lua paths
 export LUA_PATH="$ROOT_DIR/lua/?.lua;$ROOT_DIR/lua/?/init.lua;$ROOT_DIR/tests/?.lua;${LUA_PATH:-;;}"
 export LUA_CPATH="${LUA_CPATH:-;;}"
@@ -79,7 +74,6 @@ chmod 700 "$TEST_RUNTIME_DIR"
 # Create test config directory
 TEST_CONFIG_DIR="$TMP_DIR/config/somewm"
 mkdir -p "$TEST_CONFIG_DIR"
-cp "$TEST_RC_LUA" "$TEST_CONFIG_DIR/rc.lua"
 
 # Override XDG directories for test compositor to avoid conflicts
 # In visual mode, keep real XDG_RUNTIME_DIR so somewm can find parent compositor
@@ -119,6 +113,74 @@ trap cleanup EXIT INT TERM
 
 duration_between() {
     awk "BEGIN { print $2 - $1 }"
+}
+
+resolve_test_rc_lua() {
+    local test_file="$1"
+    local test_name rc_path
+
+    if [ -n "$TEST_RC_LUA" ]; then
+        printf '%s\n' "$TEST_RC_LUA"
+        return 0
+    fi
+
+    test_name=$(basename "$test_file")
+    case "$test_name" in
+        test-reload-valid.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-valid.lua"
+            ;;
+        test-reload-invalid.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-valid.lua"
+            ;;
+        test-reload-keybind-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-keybind.lua"
+            ;;
+        test-reload-client-keybind-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-client-keybind.lua"
+            ;;
+        test-reload-signal-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-signal.lua"
+            ;;
+        test-reload-class-signal-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-class-signal.lua"
+            ;;
+        test-reload-rules-reemit.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-rules.lua"
+            ;;
+        test-reload-drawin-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-drawin.lua"
+            ;;
+        test-reload-theme-shadow-refresh.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-theme-shadow.lua"
+            ;;
+        test-reload-repeat-stable.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-repeat.lua"
+            ;;
+        test-reload-stateful-modules.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-stateful-module.lua"
+            ;;
+        test-reload-default-tags-no-dup.lua)
+            rc_path="$ROOT_DIR/somewmrc.lua"
+            ;;
+        *)
+            rc_path="$ROOT_DIR/tests/rc.lua"
+            ;;
+    esac
+
+    printf '%s\n' "$rc_path"
+}
+
+prepare_test_config() {
+    local test_file="$1"
+    local rc_source
+
+    rc_source=$(resolve_test_rc_lua "$test_file")
+    if [ ! -f "$rc_source" ]; then
+        echo "Error: RC fixture not found: $rc_source" >&2
+        return 1
+    fi
+
+    cp "$rc_source" "$TEST_CONFIG_DIR/rc.lua"
 }
 
 # Wait for socket to appear
@@ -173,6 +235,12 @@ run_test() {
 
     # Record start time
     start_time=$(date +%s.%N)
+
+    if ! prepare_test_config "$test_file"; then
+        end_time=$(date +%s.%N)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
+        return 1
+    fi
 
     # Start compositor
     if ! start_somewm; then
