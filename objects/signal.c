@@ -16,6 +16,48 @@
 /** Global signal registry for class-level signals */
 static signal_array_t global_signals;
 
+typedef struct {
+    char *name;
+    const void *ref;
+} reloadable_signal_t;
+
+static reloadable_signal_t *reloadable_signals = NULL;
+static size_t reloadable_signals_len = 0;
+static size_t reloadable_signals_cap = 0;
+
+static void
+reloadable_signals_append(const char *name, const void *ref)
+{
+    if (reloadable_signals_len >= reloadable_signals_cap) {
+        size_t new_cap = reloadable_signals_cap == 0 ? 8 : reloadable_signals_cap * 2;
+        reloadable_signal_t *new_items = realloc(reloadable_signals,
+            new_cap * sizeof(*reloadable_signals));
+
+        if (!new_items)
+            return;
+
+        reloadable_signals = new_items;
+        reloadable_signals_cap = new_cap;
+    }
+
+    reloadable_signals[reloadable_signals_len].name = strdup(name);
+    reloadable_signals[reloadable_signals_len].ref = ref;
+    reloadable_signals_len++;
+}
+
+static void
+reloadable_signals_remove(const char *name, const void *ref)
+{
+    for (size_t i = 0; i < reloadable_signals_len; i++) {
+        if (reloadable_signals[i].ref == ref && strcmp(reloadable_signals[i].name, name) == 0) {
+            free(reloadable_signals[i].name);
+            reloadable_signals[i] = reloadable_signals[reloadable_signals_len - 1];
+            reloadable_signals_len--;
+            return;
+        }
+    }
+}
+
 /** Connect a callback to a global signal (used by awesome.connect_signal)
  * \param name Signal name
  * \param ref Lua reference to callback function
@@ -26,6 +68,13 @@ luaA_signal_connect(const char *name, const void *ref)
     signal_connect(&global_signals, name, ref);
 }
 
+void
+luaA_signal_connect_reloadable(const char *name, const void *ref)
+{
+    luaA_signal_connect(name, ref);
+    reloadable_signals_append(name, ref);
+}
+
 /** Disconnect a callback from a global signal (used by awesome.disconnect_signal)
  * \param name Signal name
  * \param ref Pointer to callback function
@@ -34,7 +83,10 @@ luaA_signal_connect(const char *name, const void *ref)
 bool
 luaA_signal_disconnect(const char *name, const void *ref)
 {
-    return signal_disconnect(&global_signals, name, ref);
+    bool disconnected = signal_disconnect(&global_signals, name, ref);
+    if (disconnected)
+        reloadable_signals_remove(name, ref);
+    return disconnected;
 }
 
 /** Emit a global signal (used by awesome.emit_signal)
@@ -72,6 +124,30 @@ void
 luaA_signal_cleanup(void)
 {
     signal_array_wipe(&global_signals);
+
+    for (size_t i = 0; i < reloadable_signals_len; i++) {
+        free(reloadable_signals[i].name);
+    }
+    free(reloadable_signals);
+    reloadable_signals = NULL;
+    reloadable_signals_len = 0;
+    reloadable_signals_cap = 0;
+}
+
+void
+luaA_signal_cleanup_reloadable(lua_State *L)
+{
+    for (size_t i = 0; i < reloadable_signals_len; i++) {
+        signal_disconnect(&global_signals, reloadable_signals[i].name, reloadable_signals[i].ref);
+        if (L)
+            luaA_object_unref(L, reloadable_signals[i].ref);
+        free(reloadable_signals[i].name);
+    }
+
+    free(reloadable_signals);
+    reloadable_signals = NULL;
+    reloadable_signals_len = 0;
+    reloadable_signals_cap = 0;
 }
 
 /** Emit a global signal from C code

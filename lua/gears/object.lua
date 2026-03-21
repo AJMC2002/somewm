@@ -14,8 +14,25 @@ local pairs = pairs
 local type = type
 local error = error
 local properties = require("gears.object.properties")
+local debug_getinfo = debug.getinfo
 
 local object = { properties = properties, mt = {} }
+local class_signal_registries = {}
+local class_signal_sources = setmetatable({}, { __mode = "k" })
+
+local function signal_source_in_config_tree(source, conffile)
+    if type(source) ~= "string" or source:sub(1, 1) ~= "@" then
+        return false
+    end
+
+    local config_dir = conffile and conffile:match("^(.*)/[^/]+$")
+    if not config_dir or config_dir == "" then
+        return false
+    end
+
+    local path = source:sub(2)
+    return path == config_dir or path:sub(1, #config_dir + 1) == (config_dir .. "/")
+end
 
 --- Verify that obj is indeed a valid object as returned by new()
 local function check(obj)
@@ -149,11 +166,16 @@ end
 function object._setup_class_signals(t, args)
     args = args or {}
     local conns = {}
+    table.insert(class_signal_registries, conns)
 
     function t.connect_signal(name, func)
         assert(name)
         conns[name] = conns[name] or {}
         table.insert(conns[name], func)
+        local info = debug_getinfo(2, "S")
+        if info and info.source then
+            class_signal_sources[func] = info.source
+        end
     end
 
     -- A variant of emit_signal which stops once a condition is met.
@@ -193,6 +215,19 @@ function object._setup_class_signals(t, args)
     end
 
     return conns
+end
+
+function object._clear_reloadable_class_signals(conffile)
+    for _, conns in ipairs(class_signal_registries) do
+        for _, handlers in pairs(conns) do
+            for i = #handlers, 1, -1 do
+                if signal_source_in_config_tree(class_signal_sources[handlers[i]], conffile) then
+                    class_signal_sources[handlers[i]] = nil
+                    table.remove(handlers, i)
+                end
+            end
+        end
+    end
 end
 
 local function get_miss(self, key)

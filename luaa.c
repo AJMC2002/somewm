@@ -46,6 +46,7 @@
 
 /* Forward declaration for Lua state recreation (used by config timeout handler) */
 static lua_State *luaA_create_fresh_state(void);
+static bool luaA_prescan_config(const char *config_path, const char *config_dir);
 #include "common/luaclass.h"
 #include "common/lualib.h"
 #include <stdio.h>
@@ -53,11 +54,15 @@ static lua_State *luaA_create_fresh_state(void);
 #include <string.h>
 #include <wchar.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <glib.h>
 #include <limits.h>
 #include <setjmp.h>
+#include <time.h>
 
 /* Includes merged from objects/awesome.c */
 #include "systray.h"
@@ -405,6 +410,8 @@ awesome_atexit(bool restart)
 
 /** Restart the compositor by exec'ing self.
  * Uses argv stored in globalconf at startup.
+ * Phase 1 hot reload keeps this low-level re-exec path available for future
+ * explicit restart work, but config reload now uses luaA_reload_config().
  */
 void
 awesome_restart(void)
@@ -484,15 +491,357 @@ luaA_panic(lua_State *L)
     return 0;
 }
 
-/** awesome.restart() - Restart the compositor.
- * \return Never returns on success.
+static const char *
+luaA_awesome_get_conffile(lua_State *L)
+{
+    const char *conffile;
+
+    lua_getglobal(L, "awesome");
+    lua_getfield(L, -1, "conffile");
+    conffile = lua_tostring(L, -1);
+    lua_pop(L, 2);
+
+    return conffile;
+}
+
+static int luaA_awesome_shadow_reload(lua_State *L);
+
+bool
+luaA_reload_owns_current_lua_caller(lua_State *L)
+{
+    lua_Debug ar;
+    const char *conffile;
+    const char *source;
+    char config_dir[PATH_MAX];
+    char *slash;
+    size_t dir_len;
+
+    if (!lua_getstack(L, 1, &ar) || !lua_getinfo(L, "S", &ar))
+        return false;
+
+    source = ar.source;
+    if (!source || source[0] != '@')
+        return false;
+
+    conffile = luaA_awesome_get_conffile(L);
+    if (!conffile || conffile[0] == '\0')
+        return false;
+
+    strncpy(config_dir, conffile, sizeof(config_dir) - 1);
+    config_dir[sizeof(config_dir) - 1] = '\0';
+    slash = strrchr(config_dir, '/');
+    if (!slash)
+        return false;
+    *slash = '\0';
+
+    dir_len = strlen(config_dir);
+    return strncmp(source + 1, config_dir, dir_len) == 0
+        && ((source + 1)[dir_len] == '/' || (source + 1)[dir_len] == '\0');
+}
+
+static void
+luaA_remove_probe_runtime_dir(const char *runtime_dir)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char path[PATH_MAX];
+
+    dir = opendir(runtime_dir);
+    if (!dir)
+        return;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (A_STREQ(entry->d_name, ".") || A_STREQ(entry->d_name, ".."))
+            continue;
+
+        snprintf(path, sizeof(path), "%s/%s", runtime_dir, entry->d_name);
+        unlink(path);
+    }
+
+    closedir(dir);
+    rmdir(runtime_dir);
+}
+
+static void
+luaA_stop_probe_process(pid_t pid)
+{
+    int status;
+
+    if (pid <= 0)
+        return;
+
+    if (waitpid(pid, &status, WNOHANG) == pid)
+        return;
+
+    kill(pid, SIGTERM);
+
+    for (int i = 0; i < 10; i++) {
+        if (waitpid(pid, &status, WNOHANG) == pid)
+            return;
+        nanosleep(&(struct timespec){ .tv_sec = 0, .tv_nsec = 100000000L }, NULL);
+    }
+
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+}
+
+static bool
+luaA_validate_reload_runtime(const char *config_path, const char **error_out)
+{
+    char runtime_template[] = "/tmp/somewm-reload-XXXXXX";
+    char fd_buf[32];
+    char *runtime_dir;
+    pid_t pid;
+    int probe_pipe[2];
+    int flags;
+    int status;
+    char success;
+
+    if (!globalconf.argv || !globalconf.argv[0]) {
+        if (error_out)
+            *error_out = "No somewm executable path available for reload probe";
+        return false;
+    }
+
+    runtime_dir = mkdtemp(runtime_template);
+    if (!runtime_dir) {
+        if (error_out)
+            *error_out = "Failed to create runtime dir for reload probe";
+        return false;
+    }
+
+    if (pipe(probe_pipe) != 0) {
+        luaA_remove_probe_runtime_dir(runtime_dir);
+        if (error_out)
+            *error_out = "Failed to create reload probe pipe";
+        return false;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        close(probe_pipe[0]);
+        close(probe_pipe[1]);
+        luaA_remove_probe_runtime_dir(runtime_dir);
+        if (error_out)
+            *error_out = "Failed to fork reload probe process";
+        return false;
+    }
+
+    if (pid == 0) {
+        close(probe_pipe[0]);
+        snprintf(fd_buf, sizeof(fd_buf), "%d", probe_pipe[1]);
+        setenv("SOMEWM_CONFIG_PROBE_FD", fd_buf, 1);
+        setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
+        setenv("WLR_BACKENDS", "headless", 1);
+        setenv("WLR_RENDERER", "pixman", 1);
+        setenv("WLR_WL_OUTPUTS", "1", 1);
+        unsetenv("SOMEWM_SOCKET");
+        execlp(globalconf.argv[0], globalconf.argv[0], "-c", config_path, NULL);
+        _exit(127);
+    }
+
+    close(probe_pipe[1]);
+    flags = fcntl(probe_pipe[0], F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(probe_pipe[0], F_SETFL, flags | O_NONBLOCK);
+
+    for (int i = 0; i < 100; i++) {
+        ssize_t n = read(probe_pipe[0], &success, 1);
+        if (n == 1 && success == '1') {
+            close(probe_pipe[0]);
+            luaA_stop_probe_process(pid);
+            luaA_remove_probe_runtime_dir(runtime_dir);
+            return true;
+        }
+
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            close(probe_pipe[0]);
+            luaA_remove_probe_runtime_dir(runtime_dir);
+            if (error_out)
+                *error_out = "Config failed isolated startup probe";
+            return false;
+        }
+
+        nanosleep(&(struct timespec){ .tv_sec = 0, .tv_nsec = 100000000L }, NULL);
+    }
+
+    close(probe_pipe[0]);
+    luaA_stop_probe_process(pid);
+    luaA_remove_probe_runtime_dir(runtime_dir);
+    if (error_out)
+        *error_out = "Timed out waiting for isolated reload probe";
+    return false;
+}
+
+static bool
+luaA_validate_reload_config(lua_State *L, const char **error_out)
+{
+    const char *conffile = luaA_awesome_get_conffile(L);
+
+    if (!conffile || conffile[0] == '\0') {
+        if (error_out)
+            *error_out = "No configuration file found";
+        return false;
+    }
+
+    if (!luaA_prescan_config(conffile, NULL)) {
+        if (error_out)
+            *error_out = "Config contains X11-specific patterns that may hang on Wayland";
+        return false;
+    }
+
+    if (luaL_loadfile(L, conffile) != 0) {
+        if (error_out)
+            *error_out = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        return false;
+    }
+
+    lua_pop(L, 1);
+
+    if (!luaA_validate_reload_runtime(conffile, error_out))
+        return false;
+
+    return true;
+}
+
+static void
+luaA_reload_cleanup_drawins(lua_State *L)
+{
+    int drawin_count = globalconf.drawins.len;
+
+    if (drawin_count <= 0)
+        return;
+
+    drawin_t **drawins = calloc(drawin_count, sizeof(*drawins));
+    if (!drawins)
+        return;
+
+    for (int i = 0; i < drawin_count; i++) {
+        drawins[i] = globalconf.drawins.tab[i];
+    }
+
+    for (int i = 0; i < drawin_count; i++) {
+        drawin_t *drawin = drawins[i];
+
+        if (!drawin || some_is_lock_drawin(drawin))
+            continue;
+
+        luaA_object_push(L, drawin);
+        lua_pushboolean(L, false);
+        lua_setfield(L, -2, "visible");
+        lua_pop(L, 1);
+    }
+
+    free(drawins);
+}
+
+static void
+luaA_reload_cleanup_runtime(lua_State *L)
+{
+    const char *conffile = luaA_awesome_get_conffile(L);
+
+    luaA_signal_cleanup_reloadable(L);
+    luaA_class_cleanup_reloadable(L);
+
+    key_array_wipe(&globalconf.keys);
+    key_array_init(&globalconf.keys);
+    luaA_reload_cleanup_drawins(L);
+
+    lua_getglobal(L, "root");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "_private");
+        if (lua_istable(L, -1)) {
+            lua_newtable(L);
+            lua_setfield(L, -2, "keys");
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "awful.keyboard");
+    if (lua_pcall(L, 1, 1, 0) != 0) {
+        warn("failed to load awful.keyboard during reload cleanup: %s",
+             NONULL(lua_tostring(L, -1)));
+        lua_pop(L, 1);
+    } else {
+        lua_getfield(L, -1, "_clear_client_keybindings");
+        if (lua_isfunction(L, -1)) {
+            if (lua_pcall(L, 0, 0, 0) != 0) {
+                warn("failed to clear default client keybindings during reload cleanup: %s",
+                     NONULL(lua_tostring(L, -1)));
+                lua_pop(L, 1);
+            }
+        } else {
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "gears.object");
+    if (lua_pcall(L, 1, 1, 0) != 0) {
+        warn("failed to load gears.object during reload cleanup: %s",
+             NONULL(lua_tostring(L, -1)));
+        lua_pop(L, 1);
+        return;
+    }
+
+    lua_getfield(L, -1, "_clear_reloadable_class_signals");
+    if (lua_isfunction(L, -1)) {
+        lua_pushstring(L, NONULL(conffile));
+        if (lua_pcall(L, 1, 0, 0) != 0) {
+            warn("failed to clear Lua class signals during reload cleanup: %s",
+                 NONULL(lua_tostring(L, -1)));
+            lua_pop(L, 1);
+        }
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+}
+
+bool
+luaA_reload_config(void)
+{
+    const char *error = NULL;
+    const char *conffile;
+
+    if (!globalconf_L)
+        return false;
+
+    if (!luaA_validate_reload_config(globalconf_L, &error)) {
+        warn("reload validation failed: %s", NONULL(error));
+        return false;
+    }
+
+    conffile = luaA_awesome_get_conffile(globalconf_L);
+    log_info("reloading config from %s", NONULL(conffile));
+    luaA_reload_cleanup_runtime(globalconf_L);
+
+    if (!luaA_loadrc())
+        return false;
+
+    screen_emit_scanned();
+    client_emit_scanning();
+    client_emit_scanned();
+    luaA_emit_signal_global("startup");
+    luaA_awesome_shadow_reload(globalconf_L);
+
+    return true;
+}
+
+/** awesome.restart() - Reload the compositor config in-process.
+ * \return 0 on success, Lua error on failure.
  */
 static int
 luaA_restart(lua_State *L)
 {
-    (void)L;
-    awesome_restart();
-    return 0;  /* Never reached on success */
+    if (!luaA_reload_config())
+        return luaL_error(L, "config reload failed");
+
+    return 0;
 }
 
 /** Convert Lua value to string (Lua 5.1 compatibility).
@@ -600,8 +949,7 @@ luaA_parserc(void *xdg, const char *confpatharg)
     (void)xdg;
     (void)confpatharg;
     /* Delegates to luaA_loadrc() which is the somewm implementation */
-    luaA_loadrc();
-    return true;
+    return luaA_loadrc();
 }
 
 /* ==========================================================================
@@ -733,12 +1081,15 @@ luaA_awesome_connect_signal(lua_State *L)
 	const void *ref;
 	luaL_checktype(L, 2, LUA_TFUNCTION);
 
-	lua_pushvalue(L, 2);
-	ref = luaA_object_ref(L, -1);
+    lua_pushvalue(L, 2);
+    ref = luaA_object_ref(L, -1);
 
-	luaA_signal_connect(name, ref);
+    if (luaA_reload_owns_current_lua_caller(L))
+        luaA_signal_connect_reloadable(name, ref);
+    else
+        luaA_signal_connect(name, ref);
 
-	return 0;
+    return 0;
 }
 
 /** awesome.disconnect_signal(name, callback) - Disconnect from a global signal */
@@ -3848,7 +4199,7 @@ luaA_enhance_lua_compat_error(const char *err, char *buf, size_t bufsize)
 	return false;
 }
 
-void
+bool
 luaA_loadrc(void)
 {
 	char xdg_config_path[512];
@@ -3863,7 +4214,7 @@ luaA_loadrc(void)
 
 	if (!globalconf_L) {
 		fprintf(stderr, "somewm: Lua not initialized, cannot load config\n");
-		return;
+		return false;
 	}
 
 	/* Install require() hooks for Wayland compatibility.
@@ -4189,6 +4540,8 @@ luaA_loadrc(void)
 			fprintf(stderr, "  - %s\n", config_paths[i]);
 		}
 	}
+
+	return loaded != 0;
 }
 
 /* ============================================================================

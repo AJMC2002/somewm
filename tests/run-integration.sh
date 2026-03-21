@@ -37,8 +37,10 @@ if [ -z "$TEST_RC_LUA" ]; then
     TEST_RC_LUA="$ROOT_DIR/tests/rc.lua"
 fi
 
-# Setup Lua path to include tests directory
-export LUA_PATH="$ROOT_DIR/lua/?.lua;$ROOT_DIR/lua/?/init.lua;$ROOT_DIR/tests/?.lua;;"
+# Setup Lua path to include tests directory while preserving any dev-shell Lua paths
+export LUA_PATH="$ROOT_DIR/lua/?.lua;$ROOT_DIR/lua/?/init.lua;$ROOT_DIR/tests/?.lua;${LUA_PATH:-;;}"
+export LUA_CPATH="${LUA_CPATH:-;;}"
+export SOMEWM_CLIENT
 
 # Wayland backend setup based on HEADLESS mode
 if [ "$HEADLESS" = 1 ]; then
@@ -115,6 +117,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+duration_between() {
+    awk "BEGIN { print $2 - $1 }"
+}
+
 # Wait for socket to appear
 wait_for_socket() {
     local count=0
@@ -171,7 +177,7 @@ run_test() {
     # Start compositor
     if ! start_somewm; then
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -180,7 +186,7 @@ run_test() {
     if [ ! -f "$test_path" ]; then
         echo "Error: Test file not found: $test_path" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -193,7 +199,7 @@ run_test() {
     if [ $ipc_exit -eq 124 ]; then
         kill -KILL $SOMEWM_PID 2>/dev/null || true
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -215,7 +221,7 @@ run_test() {
 
     # Record end time
     end_time=$(date +%s.%N)
-    TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+    TEST_DURATION=$(duration_between "$start_time" "$end_time")
 
     # Check for success
     if grep -q "Test finished successfully\." "$LOG"; then
@@ -240,7 +246,7 @@ run_test_persistent() {
     if ! $SOMEWM_CLIENT eval "local runner = require('_runner'); runner.set_persistent(true); runner.reset_state(); require('_state').reset()" >> "$LOG" 2>&1; then
         echo "Error: Failed to reset state before test" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -252,7 +258,7 @@ run_test_persistent() {
     if [ ! -f "$test_path" ]; then
         echo "Error: Test file not found: $test_path" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -269,14 +275,14 @@ run_test_persistent() {
         # Check for success
         if grep -q "Test finished successfully\." "$LOG"; then
             end_time=$(date +%s.%N)
-            TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+            TEST_DURATION=$(duration_between "$start_time" "$end_time")
             return 0
         fi
 
         # Check for explicit failure
         if grep -q "^Error: " "$LOG"; then
             end_time=$(date +%s.%N)
-            TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+            TEST_DURATION=$(duration_between "$start_time" "$end_time")
             return 1
         fi
 
@@ -287,7 +293,7 @@ run_test_persistent() {
     # Timeout
     echo "=== Test timed out ===" >> "$LOG"
     end_time=$(date +%s.%N)
-    TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+    TEST_DURATION=$(duration_between "$start_time" "$end_time")
     return 1
 }
 
@@ -382,7 +388,7 @@ fi
 
 # Calculate total time
 total_end=$(date +%s.%N)
-total_time=$(echo "$total_end - $total_start" | bc)
+total_time=$(duration_between "$total_start" "$total_end")
 
 # Print summary
 echo ""

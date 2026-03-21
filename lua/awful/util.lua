@@ -145,10 +145,7 @@ function util.checkfile(path)
     return e
 end
 
---- Try to restart awesome.
--- It checks if the configuration file is valid, and then restart if it's ok.
--- If it's not ok, the error will be returned.
--- @return Never return if awesome restart, or return a string error.
+--- Try to reload the configuration in-process.
 -- @staticfct awful.util.restart
 function util.restart()
     local c = util.checkfile(capi.awesome.conffile)
