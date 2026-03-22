@@ -203,6 +203,24 @@ wait_for_socket() {
     return 0
 }
 
+wait_for_ipc() {
+    local count=0
+    local max_wait=100
+
+    while [ $count -lt $max_wait ]; do
+        if $SOMEWM_CLIENT eval "return 1" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
+
+    echo "Error: IPC connection test failed" >&2
+    echo "Last 50 lines of log:" >&2
+    tail -50 "$LOG" >&2
+    return 1
+}
+
 # Start somewm
 start_somewm() {
     # Start compositor (uses XDG_CONFIG_HOME for config)
@@ -214,11 +232,7 @@ start_somewm() {
         return 1
     fi
 
-    # Test IPC connection
-    if ! $SOMEWM_CLIENT eval "return 1" > /dev/null 2>&1; then
-        echo "Error: IPC connection test failed" >&2
-        echo "Last 50 lines of log:" >&2
-        tail -50 "$LOG" >&2
+    if ! wait_for_ipc; then
         return 1
     fi
 

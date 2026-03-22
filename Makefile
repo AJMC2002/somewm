@@ -63,9 +63,9 @@ test-unit:
 test-check: build-test
 	@./tests/test-check-mode.sh ./build-test/somewm
 
-# Integration tests (visual mode by default, no ASAN)
+# Integration tests (headless by default, no ASAN)
 test-integration: build-test
-	@SOMEWM=./build-test/somewm SOMEWM_CLIENT=./build-test/somewm-client ./tests/run-integration.sh
+	@env HEADLESS=1 SOMEWM=./build-test/somewm SOMEWM_CLIENT=./build-test/somewm-client ./tests/run-integration.sh
 
 # Integration tests with ASAN (slower, catches memory bugs)
 test-asan: all
@@ -80,7 +80,8 @@ test-ci: build-test test-unit
 
 # Fast test suite using persistent compositor (10x faster)
 test-fast: build-test
-	@PERSISTENT=1 \
+	@HEADLESS=1 \
+	 PERSISTENT=1 \
 	 SOMEWM=./build-test/somewm \
 	 SOMEWM_CLIENT=./build-test/somewm-client \
 	 ./tests/run-integration.sh
@@ -92,7 +93,8 @@ ifndef TEST
 	@echo "Usage: make test-one TEST=tests/test-my-feature.lua"
 	@exit 1
 endif
-	@VERBOSE=1 \
+	@HEADLESS=1 \
+	 VERBOSE=1 \
 	 TEST_TIMEOUT=10 \
 	 SOMEWM=./build-test/somewm \
 	 SOMEWM_CLIENT=./build-test/somewm-client \
