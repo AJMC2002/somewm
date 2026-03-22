@@ -4738,6 +4738,8 @@ run(char *startup_cmd)
 {
 	struct wl_event_loop *loop;
 	GSource *wayland_source;
+	const char *probe_fd_env;
+	int probe_fd = -1;
 
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(dpy);
@@ -4765,9 +4767,24 @@ run(char *startup_cmd)
 	 * This matches AwesomeWM's screen_scan() which emits _added before luaA_parserc().
 	 * The ::connected mechanism in awful/screen.lua handles initial screens when
 	 * rc.lua connects its handlers. */
+	probe_fd_env = getenv("SOMEWM_CONFIG_PROBE_FD");
+	if (probe_fd_env && probe_fd_env[0] != '\0')
+		probe_fd = atoi(probe_fd_env);
+
 	if (globalconf_L) {
 		luaA_screen_emit_all_added(globalconf_L);
-		luaA_loadrc();
+		bool rc_loaded = luaA_loadrc();
+		if (probe_fd >= 0) {
+			if (!rc_loaded) {
+				close(probe_fd);
+				_exit(EXIT_FAILURE);
+			}
+			if (write(probe_fd, "1", 1) != 1) {
+				close(probe_fd);
+				_exit(EXIT_FAILURE);
+			}
+			close(probe_fd);
+		}
 		/* Emit screen::scanned AFTER rc.lua loads (matches AwesomeWM).
 		 * This allows rc.lua handlers to be connected before scanned fires. */
 		screen_emit_scanned();

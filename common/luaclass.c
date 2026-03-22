@@ -221,6 +221,52 @@ luaA_class_gc(lua_State *L)
     return 0;
 }
 
+typedef struct {
+    lua_class_t *lua_class;
+    char *name;
+    const void *ref;
+} reloadable_class_signal_t;
+
+static reloadable_class_signal_t *reloadable_class_signals = NULL;
+static size_t reloadable_class_signals_len = 0;
+static size_t reloadable_class_signals_cap = 0;
+
+static void
+reloadable_class_signals_append(lua_class_t *lua_class, const char *name, const void *ref)
+{
+    if (reloadable_class_signals_len >= reloadable_class_signals_cap) {
+        size_t new_cap = reloadable_class_signals_cap == 0 ? 8 : reloadable_class_signals_cap * 2;
+        reloadable_class_signal_t *new_items = realloc(reloadable_class_signals,
+            new_cap * sizeof(*reloadable_class_signals));
+
+        if (!new_items)
+            return;
+
+        reloadable_class_signals = new_items;
+        reloadable_class_signals_cap = new_cap;
+    }
+
+    reloadable_class_signals[reloadable_class_signals_len].lua_class = lua_class;
+    reloadable_class_signals[reloadable_class_signals_len].name = strdup(name);
+    reloadable_class_signals[reloadable_class_signals_len].ref = ref;
+    reloadable_class_signals_len++;
+}
+
+static void
+reloadable_class_signals_remove(lua_class_t *lua_class, const char *name, const void *ref)
+{
+    for (size_t i = 0; i < reloadable_class_signals_len; i++) {
+        if (reloadable_class_signals[i].lua_class == lua_class
+                && reloadable_class_signals[i].ref == ref
+                && strcmp(reloadable_class_signals[i].name, name) == 0) {
+            free(reloadable_class_signals[i].name);
+            reloadable_class_signals[i] = reloadable_class_signals[reloadable_class_signals_len - 1];
+            reloadable_class_signals_len--;
+            return;
+        }
+    }
+}
+
 /** Setup a new Lua class.
  * \param L The Lua VM state.
  * \param name The class name.
@@ -328,7 +374,10 @@ luaA_class_connect_signal_from_stack(lua_State *L, lua_class_t *lua_class,
     luaA_class_emit_signal(L, lua_class, buf, 1);
 
     /* Register the signal to the CAPI list */
-    signal_connect(&lua_class->signals, name, luaA_object_ref(L, ud));
+    const void *ref = luaA_object_ref(L, ud);
+    signal_connect(&lua_class->signals, name, ref);
+    if (luaA_reload_owns_current_lua_caller(L))
+        reloadable_class_signals_append(lua_class, name, ref);
 }
 
 void
@@ -338,9 +387,29 @@ luaA_class_disconnect_signal_from_stack(lua_State *L, lua_class_t *lua_class,
     void *ref;
     luaA_checkfunction(L, ud);
     ref = (void *) lua_topointer(L, ud);
-    if (signal_disconnect(&lua_class->signals, name, ref))
+    if (signal_disconnect(&lua_class->signals, name, ref)) {
+        reloadable_class_signals_remove(lua_class, name, ref);
         luaA_object_unref(L, (void *) ref);
+    }
     lua_remove(L, ud);
+}
+
+void
+luaA_class_cleanup_reloadable(lua_State *L)
+{
+    for (size_t i = 0; i < reloadable_class_signals_len; i++) {
+        signal_disconnect(&reloadable_class_signals[i].lua_class->signals,
+            reloadable_class_signals[i].name,
+            reloadable_class_signals[i].ref);
+        if (L)
+            luaA_object_unref(L, reloadable_class_signals[i].ref);
+        free(reloadable_class_signals[i].name);
+    }
+
+    free(reloadable_class_signals);
+    reloadable_class_signals = NULL;
+    reloadable_class_signals_len = 0;
+    reloadable_class_signals_cap = 0;
 }
 
 void

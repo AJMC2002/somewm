@@ -24,9 +24,11 @@ struct screen_t;
 /* Global signal system setup/cleanup */
 void luaA_signal_setup(lua_State *L);
 void luaA_signal_cleanup(void);
+void luaA_signal_cleanup_reloadable(lua_State *L);
 
 /* Connect/disconnect/emit for awesome.connect_signal() etc. */
 void luaA_signal_connect(const char *name, const void *ref);
+void luaA_signal_connect_reloadable(const char *name, const void *ref);
 bool luaA_signal_disconnect(const char *name, const void *ref);
 void luaA_signal_emit(lua_State *L, const char *name, int nargs);
 

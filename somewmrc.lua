@@ -46,7 +46,7 @@ if awesome.x11_fallback_info then
             "Pattern: %s\n" ..
             "Code: %s\n\n" ..
             "Suggestion: %s\n\n" ..
-            "Edit your rc.lua to remove X11 dependencies, then restart somewm.",
+            "Edit your rc.lua to remove X11 dependencies, then reload somewm.",
             info.config_path or "unknown",
             info.line_number or 0,
             info.pattern or "unknown",
@@ -92,7 +92,7 @@ myawesomemenu = {
    { "hotkeys", function() hotkeys_popup.show_help(nil, awful.screen.focused()) end },
    { "manual", terminal .. " -e man awesome" },
    { "edit config", editor_cmd .. " " .. awesome.conffile },
-   { "restart", awesome.restart },
+   { "reload", awesome.restart },
    { "quit", function() awesome.quit() end },
 }
 
@@ -168,10 +168,17 @@ mytextclock = wibox.widget.textclock()
 
 -- @DOC_FOR_EACH_SCREEN@
 screen.connect_signal("request::desktop_decoration", function(s)
+    if s.mywibox and s.mywibox.remove then
+        s.mywibox:remove()
+        s.mywibox = nil
+    end
+
     -- Restore saved tags if this output was previously removed
     local output_name = s.output and s.output.name
     local restore = output_name and awful.permissions.saved_tags[output_name]
-    if restore then
+    local has_tags = #s.tags > 0
+
+    if restore and not has_tags then
         awful.permissions.saved_tags[output_name] = nil
         -- Pass 1: recreate tags and build per-client tag lists
         local client_tags = {}
@@ -200,7 +207,9 @@ screen.connect_signal("request::desktop_decoration", function(s)
         end
     else
         -- Each screen has its own tag table.
-        awful.tag({ "1", "2", "3", "4", "5", "6", "7", "8", "9" }, s, awful.layout.layouts[1])
+        if not has_tags then
+            awful.tag({ "1", "2", "3", "4", "5", "6", "7", "8", "9" }, s, awful.layout.layouts[1])
+        end
     end
 
     -- Create a promptbox for each screen
@@ -302,7 +311,7 @@ awful.keyboard.append_global_keybindings({
     awful.key({ modkey,           }, "w", function () mymainmenu:show() end,
               {description = "show main menu", group = "awesome"}),
     awful.key({ modkey, "Control" }, "r", awesome.restart,
-              {description = "reload awesome", group = "awesome"}),
+              {description = "reload config", group = "awesome"}),
     awful.key({ modkey, "Shift"   }, "q", awesome.quit,
               {description = "quit awesome", group = "awesome"}),
     awful.key({ modkey,           }, "l",     function () awful.tag.incmwfact( 0.05)          end,

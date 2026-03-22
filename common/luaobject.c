@@ -29,6 +29,58 @@
 
 #include "common/luaobject.h"
 #include "common/lualib.h"
+#include "luaa.h"
+
+typedef struct {
+    const void *object_ref;
+    char *name;
+    const void *ref;
+} reloadable_object_signal_t;
+
+static reloadable_object_signal_t *reloadable_object_signals = NULL;
+static size_t reloadable_object_signals_len = 0;
+static size_t reloadable_object_signals_cap = 0;
+
+static void
+reloadable_object_signals_append(const void *object_ref, const char *name, const void *ref)
+{
+    if (!object_ref)
+        return;
+
+    if (reloadable_object_signals_len >= reloadable_object_signals_cap) {
+        size_t new_cap = reloadable_object_signals_cap == 0 ? 8 : reloadable_object_signals_cap * 2;
+        reloadable_object_signal_t *new_items = realloc(reloadable_object_signals,
+            new_cap * sizeof(*reloadable_object_signals));
+
+        if (!new_items)
+            return;
+
+        reloadable_object_signals = new_items;
+        reloadable_object_signals_cap = new_cap;
+    }
+
+    reloadable_object_signals[reloadable_object_signals_len].object_ref = object_ref;
+    reloadable_object_signals[reloadable_object_signals_len].name = strdup(name);
+    reloadable_object_signals[reloadable_object_signals_len].ref = ref;
+    reloadable_object_signals_len++;
+}
+
+static void
+reloadable_object_signals_remove(lua_State *L, const void *object_ref, const char *name, const void *ref)
+{
+    for (size_t i = 0; i < reloadable_object_signals_len; i++) {
+        if (reloadable_object_signals[i].object_ref == object_ref
+                && reloadable_object_signals[i].ref == ref
+                && strcmp(reloadable_object_signals[i].name, name) == 0) {
+            free(reloadable_object_signals[i].name);
+            if (L && object_ref)
+                luaA_object_unref(L, object_ref);
+            reloadable_object_signals[i] = reloadable_object_signals[reloadable_object_signals_len - 1];
+            reloadable_object_signals_len--;
+            return;
+        }
+    }
+}
 
 /** Setup the object system at startup.
  * \param L The Lua VM state.
@@ -206,9 +258,17 @@ luaA_object_connect_signal_from_stack(lua_State *L, int oud,
                                       const char *name, int ud)
 {
     lua_object_t *obj;
+    const void *ref;
+    const void *object_ref = NULL;
     luaA_checkfunction(L, ud);
     obj = lua_touserdata(L, oud);
-    signal_connect(&obj->signals, name, luaA_object_ref_item(L, oud, ud));
+    ref = luaA_object_ref_item(L, oud, ud);
+    signal_connect(&obj->signals, name, ref);
+
+    if (luaA_reload_owns_current_lua_caller(L)) {
+        object_ref = luaA_object_ref(L, oud);
+        reloadable_object_signals_append(object_ref, name, ref);
+    }
 }
 
 /** Remove a signal to an object.
@@ -223,12 +283,44 @@ luaA_object_disconnect_signal_from_stack(lua_State *L, int oud,
 {
     lua_object_t *obj;
     void *ref;
+    const void *object_ref;
     luaA_checkfunction(L, ud);
     obj = lua_touserdata(L, oud);
     ref = (void *) lua_topointer(L, ud);
-    if (signal_disconnect(&obj->signals, name, ref))
+    object_ref = lua_topointer(L, oud);
+    if (signal_disconnect(&obj->signals, name, ref)) {
         luaA_object_unref_item(L, oud, ref);
+        reloadable_object_signals_remove(L, object_ref, name, ref);
+    }
     lua_remove(L, ud);
+}
+
+void
+luaA_object_cleanup_reloadable(lua_State *L)
+{
+    for (size_t i = 0; i < reloadable_object_signals_len; i++) {
+        const void *object_ref = reloadable_object_signals[i].object_ref;
+
+        if (L && object_ref) {
+            luaA_object_push(L, object_ref);
+            if (lua_isuserdata(L, -1)) {
+                lua_object_t *obj = lua_touserdata(L, -1);
+                signal_disconnect(&obj->signals,
+                    reloadable_object_signals[i].name,
+                    reloadable_object_signals[i].ref);
+                luaA_object_unref_item(L, -1, (void *) reloadable_object_signals[i].ref);
+            }
+            lua_pop(L, 1);
+            luaA_object_unref(L, object_ref);
+        }
+
+        free(reloadable_object_signals[i].name);
+    }
+
+    free(reloadable_object_signals);
+    reloadable_object_signals = NULL;
+    reloadable_object_signals_len = 0;
+    reloadable_object_signals_cap = 0;
 }
 
 void

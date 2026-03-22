@@ -153,6 +153,7 @@ luaA_object_push(lua_State *L, const void *pointer)
 
 void signal_object_emit(lua_State *, signal_array_t *, const char *, int);
 
+void luaA_object_cleanup_reloadable(lua_State *);
 void luaA_object_connect_signal(lua_State *, int, const char *, lua_CFunction);
 void luaA_object_disconnect_signal(lua_State *, int, const char *, lua_CFunction);
 void luaA_object_connect_signal_from_stack(lua_State *, int, const char *, int);

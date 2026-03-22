@@ -143,7 +143,7 @@ print_usage(const char *progname)
 	fprintf(stderr, "  version                        Show compositor version\n");
 	fprintf(stderr, "  lock                           Lock the session\n");
 	fprintf(stderr, "  reload                         Reload configuration\n");
-	fprintf(stderr, "  restart                        Full compositor restart\n\n");
+	fprintf(stderr, "  restart                        Alias for in-process reload\n\n");
 
 	fprintf(stderr, "DISPLAY MANAGEMENT:\n");
 	fprintf(stderr, "  output list                    List all outputs\n");
@@ -257,6 +257,24 @@ send_command(int sock, int argc, char *argv[], int json_mode, int start_arg)
 	char command[BUFFER_SIZE];
 	int offset = 0;
 	int i;
+
+	if (start_arg < argc &&
+	    (strcmp(argv[start_arg], "reload") == 0 || strcmp(argv[start_arg], "restart") == 0)) {
+		offset = snprintf(command, BUFFER_SIZE,
+		                 "%seval awesome.restart(); return 'Reloading...'\n",
+		                 json_mode ? "--json " : "");
+		if (offset < 0 || offset >= BUFFER_SIZE) {
+			fprintf(stderr, "Error: Command too long\n");
+			return -1;
+		}
+
+		if (write(sock, command, offset) != offset) {
+			perror("write");
+			return -1;
+		}
+
+		return 0;
+	}
 
 	/* Prepend --json if requested */
 	if (json_mode) {
@@ -493,7 +511,7 @@ print_completions(const char *shell)
 		printf("    'ping:Test connection'\n");
 		printf("    'quit:Exit compositor'\n");
 		printf("    'reload:Reload configuration'\n");
-		printf("    'restart:Restart compositor'\n");
+		printf("    'restart:Alias for in-process reload'\n");
 		printf("    'rule:Client rules'\n");
 		printf("    'screen:Screen management'\n");
 		printf("    'screenshot:Screenshot capture'\n");
@@ -564,7 +582,7 @@ print_completions(const char *shell)
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'ping' -d 'Test connection'\n");
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'quit' -d 'Exit compositor'\n");
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'reload' -d 'Reload configuration'\n");
-		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'restart' -d 'Restart compositor'\n");
+		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'restart' -d 'Alias for in-process reload'\n");
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'rule' -d 'Client rules'\n");
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'screen' -d 'Screen management'\n");
 		printf("complete -c somewm-client -n '__fish_use_subcommand' -a 'screenshot' -d 'Screenshot capture'\n");

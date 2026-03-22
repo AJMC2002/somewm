@@ -2486,28 +2486,13 @@ local function register_builtin_commands()
   --- reload - Reload configuration (validates first)
   ipc.register("reload", function()
     local awful_util = require("awful.util")
+    local result = awful_util.restart()
 
-    -- Get config file path
-    local conffile = capi.awesome.conffile
-    if not conffile then
-      error("No configuration file found")
+    if result then
+      error("Config validation failed: " .. result)
     end
 
-    -- Validate config first if checkfile is available
-    if awful_util.checkfile then
-      local result = awful_util.checkfile(conffile)
-      if result then
-        error("Config validation failed: " .. result)
-      end
-    end
-
-    -- Restart (which reloads config)
-    if capi.awesome.restart then
-      capi.awesome.restart()
-      return "Reloading..."
-    else
-      error("Reload not supported")
-    end
+    return "Reloading..."
   end)
 
   --- restart - Full compositor restart

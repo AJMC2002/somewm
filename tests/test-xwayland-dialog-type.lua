@@ -25,9 +25,18 @@ if is_headless() then
     return
 end
 
+local function command_exists(cmd)
+    local handle = io.popen("which " .. cmd .. " >/dev/null 2>&1; status=$?; printf %s \"$status\"")
+    if not handle then
+        return false
+    end
+    local result = handle:read("*a")
+    handle:close()
+    return tonumber(result) == 0
+end
+
 -- Skip if python3 not available
-local python3_check = os.execute("which python3 >/dev/null 2>&1")
-if not python3_check then
+if not command_exists("python3") then
     io.stderr:write("SKIP: python3 not available for X11 helper\n")
     io.stderr:write("Test finished successfully.\n")
     awesome.quit()
