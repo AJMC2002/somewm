@@ -104,8 +104,10 @@ luaA_unregister(lua_State *L, int *ref)
 
 /* Core initialization */
 void luaA_init(void);
-void luaA_loadrc(void);
+bool luaA_loadrc(void);
+bool luaA_reload_config(void);
 void luaA_cleanup(void);
+bool luaA_reload_owns_current_lua_caller(lua_State *L);
 
 /* awesome module (merged from objects/awesome.c) */
 void luaA_awesome_setup(lua_State *L);

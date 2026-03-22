@@ -32,13 +32,10 @@ TEST_RC_LUA="${TEST_RC_LUA:-}"
 cd "$(dirname "$0")/.."
 ROOT_DIR="$PWD"
 
-# Use minimal test config by default
-if [ -z "$TEST_RC_LUA" ]; then
-    TEST_RC_LUA="$ROOT_DIR/tests/rc.lua"
-fi
-
-# Setup Lua path to include tests directory
-export LUA_PATH="$ROOT_DIR/lua/?.lua;$ROOT_DIR/lua/?/init.lua;$ROOT_DIR/tests/?.lua;;"
+# Setup Lua path to include tests directory while preserving any dev-shell Lua paths
+export LUA_PATH="$ROOT_DIR/lua/?.lua;$ROOT_DIR/lua/?/init.lua;$ROOT_DIR/tests/?.lua;${LUA_PATH:-;;}"
+export LUA_CPATH="${LUA_CPATH:-;;}"
+export SOMEWM_CLIENT
 
 # Wayland backend setup based on HEADLESS mode
 if [ "$HEADLESS" = 1 ]; then
@@ -77,7 +74,6 @@ chmod 700 "$TEST_RUNTIME_DIR"
 # Create test config directory
 TEST_CONFIG_DIR="$TMP_DIR/config/somewm"
 mkdir -p "$TEST_CONFIG_DIR"
-cp "$TEST_RC_LUA" "$TEST_CONFIG_DIR/rc.lua"
 
 # Override XDG directories for test compositor to avoid conflicts
 # In visual mode, keep real XDG_RUNTIME_DIR so somewm can find parent compositor
@@ -115,6 +111,81 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+duration_between() {
+    awk "BEGIN { print $2 - $1 }"
+}
+
+resolve_test_rc_lua() {
+    local test_file="$1"
+    local test_name rc_path
+
+    if [ -n "$TEST_RC_LUA" ]; then
+        printf '%s\n' "$TEST_RC_LUA"
+        return 0
+    fi
+
+    test_name=$(basename "$test_file")
+    case "$test_name" in
+        test-reload-valid.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-valid.lua"
+            ;;
+        test-reload-invalid.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-valid.lua"
+            ;;
+        test-reload-keybind-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-keybind.lua"
+            ;;
+        test-reload-client-keybind-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-client-keybind.lua"
+            ;;
+        test-reload-signal-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-signal.lua"
+            ;;
+        test-reload-class-signal-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-class-signal.lua"
+            ;;
+        test-reload-rules-reemit.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-rules.lua"
+            ;;
+        test-reload-drawin-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-drawin.lua"
+            ;;
+        test-reload-theme-shadow-refresh.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-theme-shadow.lua"
+            ;;
+        test-reload-repeat-stable.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-repeat.lua"
+            ;;
+        test-reload-stateful-modules.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-stateful-module.lua"
+            ;;
+        test-reload-default-tags-no-dup.lua)
+            rc_path="$ROOT_DIR/somewmrc.lua"
+            ;;
+        test-reload-instance-signal-no-dup.lua)
+            rc_path="$ROOT_DIR/tests/rc-reload-instance-signal.lua"
+            ;;
+        *)
+            rc_path="$ROOT_DIR/tests/rc.lua"
+            ;;
+    esac
+
+    printf '%s\n' "$rc_path"
+}
+
+prepare_test_config() {
+    local test_file="$1"
+    local rc_source
+
+    rc_source=$(resolve_test_rc_lua "$test_file")
+    if [ ! -f "$rc_source" ]; then
+        echo "Error: RC fixture not found: $rc_source" >&2
+        return 1
+    fi
+
+    cp "$rc_source" "$TEST_CONFIG_DIR/rc.lua"
+}
+
 # Wait for socket to appear
 wait_for_socket() {
     local count=0
@@ -135,6 +206,24 @@ wait_for_socket() {
     return 0
 }
 
+wait_for_ipc() {
+    local count=0
+    local max_wait=100
+
+    while [ $count -lt $max_wait ]; do
+        if $SOMEWM_CLIENT eval "return 1" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
+
+    echo "Error: IPC connection test failed" >&2
+    echo "Last 50 lines of log:" >&2
+    tail -50 "$LOG" >&2
+    return 1
+}
+
 # Start somewm
 start_somewm() {
     # Start compositor (uses XDG_CONFIG_HOME for config)
@@ -146,11 +235,7 @@ start_somewm() {
         return 1
     fi
 
-    # Test IPC connection
-    if ! $SOMEWM_CLIENT eval "return 1" > /dev/null 2>&1; then
-        echo "Error: IPC connection test failed" >&2
-        echo "Last 50 lines of log:" >&2
-        tail -50 "$LOG" >&2
+    if ! wait_for_ipc; then
         return 1
     fi
 
@@ -168,10 +253,16 @@ run_test() {
     # Record start time
     start_time=$(date +%s.%N)
 
+    if ! prepare_test_config "$test_file"; then
+        end_time=$(date +%s.%N)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
+        return 1
+    fi
+
     # Start compositor
     if ! start_somewm; then
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -180,7 +271,7 @@ run_test() {
     if [ ! -f "$test_path" ]; then
         echo "Error: Test file not found: $test_path" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -193,7 +284,7 @@ run_test() {
     if [ $ipc_exit -eq 124 ]; then
         kill -KILL $SOMEWM_PID 2>/dev/null || true
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -215,7 +306,7 @@ run_test() {
 
     # Record end time
     end_time=$(date +%s.%N)
-    TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+    TEST_DURATION=$(duration_between "$start_time" "$end_time")
 
     # Check for success
     if grep -q "Test finished successfully\." "$LOG"; then
@@ -240,7 +331,7 @@ run_test_persistent() {
     if ! $SOMEWM_CLIENT eval "local runner = require('_runner'); runner.set_persistent(true); runner.reset_state(); require('_state').reset()" >> "$LOG" 2>&1; then
         echo "Error: Failed to reset state before test" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -252,7 +343,7 @@ run_test_persistent() {
     if [ ! -f "$test_path" ]; then
         echo "Error: Test file not found: $test_path" >&2
         end_time=$(date +%s.%N)
-        TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+        TEST_DURATION=$(duration_between "$start_time" "$end_time")
         return 1
     fi
 
@@ -269,14 +360,14 @@ run_test_persistent() {
         # Check for success
         if grep -q "Test finished successfully\." "$LOG"; then
             end_time=$(date +%s.%N)
-            TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+            TEST_DURATION=$(duration_between "$start_time" "$end_time")
             return 0
         fi
 
         # Check for explicit failure
         if grep -q "^Error: " "$LOG"; then
             end_time=$(date +%s.%N)
-            TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+            TEST_DURATION=$(duration_between "$start_time" "$end_time")
             return 1
         fi
 
@@ -287,7 +378,7 @@ run_test_persistent() {
     # Timeout
     echo "=== Test timed out ===" >> "$LOG"
     end_time=$(date +%s.%N)
-    TEST_DURATION=$(echo "$end_time - $start_time" | bc)
+    TEST_DURATION=$(duration_between "$start_time" "$end_time")
     return 1
 }
 
@@ -382,7 +473,7 @@ fi
 
 # Calculate total time
 total_end=$(date +%s.%N)
-total_time=$(echo "$total_end - $total_start" | bc)
+total_time=$(duration_between "$total_start" "$total_end")
 
 # Print summary
 echo ""

@@ -9,7 +9,7 @@ This document tracks all known differences between somewm and AwesomeWM. These e
 | Systray | X11 `_NET_SYSTEMTRAY` embed | StatusNotifierItem D-Bus (SNI) | X11 tray protocol doesn't exist on Wayland |
 | Titlebar borders | Outside frame (X server draws) | Inset by `border_width` | Scene graph positioning differs |
 | Window visibility | `xcb_map_window()` shows immediately | Content must exist before showing | Prevents smearing artifacts |
-| WM restart | `awesome.restart()` works | Not supported | Wayland compositor can't restart in place |
+| WM restart | `awesome.restart()` restarts the WM process | `awesome.restart()` hot-reloads config in-process; full process restart is not supported | Wayland compositor can't restart in place |
 | GTK theme detection | Creates GTK widgets, queries `GtkStyleContext` | Parses `gtk-3.0/settings.ini` and `gtk-4.0/settings.ini` | Creating GTK windows inside a compositor is unsafe |
 | Xresources | Queries `xrdb` server | Parses `~/.Xresources` file directly | No `xrdb` server on Wayland |
 | Wibox shape surfaces | 1-bit (`cairo.Format.A1`) | Full ARGB32 with anti-aliasing | Enables anti-aliased rounded corners and HiDPI scaling |
